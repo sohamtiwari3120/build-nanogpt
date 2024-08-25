@@ -19,7 +19,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__(*args, **kwargs)
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3* config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd) # q, k, v
         # output_projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
@@ -29,6 +29,8 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("bias", torch.tril(
             torch.ones(config.block_size, config.block_size)
         ).view(1, 1, config.block_size, config.block_size))
+        # tril creates a lower triangular matrix from an input tensor
+        # creates a causal self attn mask of shape (seqLen, seqLen)
         
     def forward(self, x):
         B, T, C = x.size()
@@ -40,7 +42,7 @@ class CausalSelfAttention(nn.Module):
         # attention (materializes the large (T, T) matrix for queries and keys)
         att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # making the attention causal
-        att = F.softmax(att, dim=-1) # upper triangle will be zero, since exp(-inf) ~= 0
+        att = F.softmax(att, dim=-1) # lower triangle will be zero, since exp(-inf) ~= 0
         # hence causal self attention
         y = att @ v # (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -117,7 +119,7 @@ class GPT(nn.Module):
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # dicars this mask / bias
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / bias buffer
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
