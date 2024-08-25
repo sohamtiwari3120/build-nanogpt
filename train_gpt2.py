@@ -94,6 +94,30 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # GPT-2 uses no bias
 
+    def forward(self, idx, targets = None):
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T},\
+            block size is {self.config.block_size}"
+        # forward the token and pos embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos) # pe of shape (T, n_embd), this will be broadcasted later
+        tok_emb = self.transformer.wte(idx) # te of shape (B, T, n_embd)
+        x = tok_emb + pos_emb
+        for block in self.transformer.h:
+            x = block(x)
+        # forward the final layernorm and classifier
+        x = self.transformer.ln_f(x) # (B, T, n_embd)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1)
+            ) # flattening logits (B, T, vocab_size) -> (B * T, vocab_size)
+            # # flattening targets from (B, T) -> (B * T )
+        return logits, loss
+
+
+
     @classmethod
     def from_pretrained(cls, model_type: str):
         """Loads pretrained GPT-2 model weights from huggingface
