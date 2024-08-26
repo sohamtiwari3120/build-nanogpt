@@ -94,6 +94,9 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # GPT-2 uses no bias
 
+        # weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
+
     def forward(self, idx, targets = None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T},\
@@ -114,6 +117,7 @@ class GPT(nn.Module):
                 logits.view(-1, logits.size(-1)), targets.view(-1)
             ) # flattening logits (B, T, vocab_size) -> (B * T, vocab_size)
             # # flattening targets from (B, T) -> (B * T )
+            # this will automatically compute the softmax of the input logits before computing NLL
         return logits, loss
 
 
