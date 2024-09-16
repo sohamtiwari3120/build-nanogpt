@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import math
 
 # ---------------------------------------------------------------------------------------
 @dataclass
@@ -29,7 +30,11 @@ class CausalSelfAttention(nn.Module):
         # not really a 'bias', more of a mask but following the the OpenAI/HF naming
         self.register_buffer("bias", torch.tril(
             torch.ones(config.block_size, config.block_size)
-        ).view(1, 1, config.block_size, config.block_size))
+        ).view(1, 1, config.block_size, config.block_size)) 
+        # [1, 0, 0, 0]
+        # [1, 1, 0, 0]
+        # [1, 1, 1, 0]
+        # [1, 1, 1, 1]
         # tril creates a lower triangular matrix from an input tensor
         # creates a causal self attn mask of shape (seqLen, seqLen)
         
@@ -41,9 +46,9 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         # attention (materializes the large (T, T) matrix for queries and keys)
-        att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(k.size(-1)))
+        att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # making the attention causal
-        att = F.softmax(att, dim=-1) # lower triangle will be zero, since exp(-inf) ~= 0
+        att = F.softmax(att, dim=-1) # upper triangle will be zero, since exp(-inf) ~= 0, and we are replacing with -inf where mask == 0
         # hence causal self attention
         y = att @ v # (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -96,7 +101,7 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # GPT-2 uses no bias
 
-        # weight sharing scheme
+        # weight sharing scheme, they both have the same job, just in reverse
         self.transformer.wte.weight = self.lm_head.weight
 
         # init params
@@ -104,10 +109,10 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         # std weight determined from source code of gpt-2 relased by openai
-        if isinstance(module, nn.Module):
+        if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * module.config.n_layer) ** -0.5
+                std *= (2 * self.config.n_layer) ** -0.5 # 1 / √(2* num of times noise added by the residual layer)
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -191,13 +196,56 @@ class GPT(nn.Module):
 
         return model
     
+def get_device():
+    """
+    Returns the best available device: CUDA, MPS (Apple Silicon), or CPU.
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using MPS (Apple Silicon GPU)")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+    
+    return device
 
 # ---------------------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def test_code():
     seed = 1337
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
+        
     model = GPT.from_pretrained('gpt2')
     print(f"didn't crash yay!")
+
+    device = get_device()
+
+    # get a data batch
+    import tiktoken
+    enc = tiktoken.get_encoding('gpt2')
+    with open('input.txt', 'r') as f:
+        text = f.read()
+    
+    text = text[:1000]
+    tokens = enc.encode(text)
+    
+    B, T = 4, 32
+    buf = torch.tensor(tokens[:B*T + 1]).to(device)
+    x = buf[:-1].view(B, T)
+    y = buf[1:].view(B, T)
+    
+    # get logits
+    model = GPT(GPTConfig())
+    model.to(device)
+    logits, loss = model(x, y)
+    
+    print(loss)
+
+
+if __name__ == "__main__":
+    test_code()
