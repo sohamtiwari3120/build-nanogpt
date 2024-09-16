@@ -242,10 +242,16 @@ def test_code():
     # get logits
     model = GPT(GPTConfig())
     model.to(device)
-    logits, loss = model(x, y)
+    # logits, loss = model(x, y)
     
-    print(loss)
-
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(50):
+        optimizer.zero_grad()
+        logits, loss = model(x, y)
+        loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
+        optimizer.step()
+        print(f"step {i}, loss: {loss.item()}")
+    
 
 if __name__ == "__main__":
     test_code()
