@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
+import time
 
 # ---------------------------------------------------------------------------------------
 @dataclass
@@ -46,11 +47,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         # attention (materializes the large (T, T) matrix for queries and keys)
-        att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # making the attention causal
-        att = F.softmax(att, dim=-1) # upper triangle will be zero, since exp(-inf) ~= 0, and we are replacing with -inf where mask == 0
-        # hence causal self attention
-        y = att @ v # (B, nh, T, hs)
+        # att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # making the attention causal
+        # att = F.softmax(att, dim=-1) # upper triangle will be zero, since exp(-inf) ~= 0, and we are replacing with -inf where mask == 0
+        # # hence causal self attention
+        # y = att @ v # (B, nh, T, hs)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         # re-assemble all heads output side by side
         y = self.c_proj(y) # output projection
@@ -255,29 +257,41 @@ def test_code():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         
-    model = GPT.from_pretrained('gpt2')
-    print(f"didn't crash yay!")
+    # model = GPT.from_pretrained('gpt2')
 
     device = get_device()
 
     # get a data batch
-    B, T = 4, 32
+    B, T = 8, 32
     train_loader = DataLoaderLite(B, T)
-    
+    torch.set_float32_matmul_precision('high')
     # get logits
     model = GPT(GPTConfig())
+    print(f"didn't crash yay!")
     model.to(device)
-    # logits, loss = model(x, y)
     
+    # model = torch.compile(model)
+    # logits, loss = model(x, y)
+    if device == torch.device('cuda'):
+        sync = lambda: torch.cuda.synchronize()
+    elif device == torch.device('mps'):
+        sync = lambda: torch.mps.synchronize()
+        
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     for i in range(50):
+        t0 = time.time()
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        logits, loss = model(x, y)
+        # with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
+        logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
         loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
         optimizer.step()
-        print(f"step {i}, loss: {loss.item()}")
+        sync()
+        t1 = time.time()
+        dt = (t1 - t0) * 1000 # time diff in milliseconds
+        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+        print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
     
     # NOTE: IMPORTANT INSIGHT
     # 1. We expect the loss to still decrease on the above small dataset.
