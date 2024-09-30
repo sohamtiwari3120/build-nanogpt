@@ -9,7 +9,8 @@ import time
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # max sequence length
-    vocab_size: int = 50257 # number of tokens: 50,000 BPE + 256 bytes tokens + 1 <|endoftext}> token
+    # vocab_size: int = 50257 # number of tokens: 50,000 BPE + 256 bytes tokens + 1 <|endoftext}> token
+    vocab_size: int = 50304 # this is a multiple of 128, extra tokens would be ignored, being a muktiple of two makes it use more optimal number of kernels (and no need for kernels for stragglers). Despite the more memory, the computation was faster for Andrej Karpathy by ~4%.
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
