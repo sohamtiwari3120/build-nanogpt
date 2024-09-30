@@ -216,6 +216,24 @@ def get_device():
     return device
 
 # ---------------------------------------------------------------------------------------
+# LR Scheduler
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+max_steps = 50 
+def get_lr(it):
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
+    
+    if it > max_steps:
+        return min_lr
+    
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <=1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # range (-1, 1) -> (0, 1)
+    return min_lr + coeff * (max_lr - min_lr) # should this not be max_lr - coeff * (max_lr - min_lr) ??
+
+# ---------------------------------------------------------------------------------------
 import tiktoken
 
 class DataLoaderLite:
@@ -278,8 +296,8 @@ def test_code():
     elif device == torch.device('mps'):
         sync = lambda: torch.mps.synchronize()
         
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    for i in range(50):
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    for step in range(max_steps):
         t0 = time.time()
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
@@ -287,12 +305,17 @@ def test_code():
         # with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
         logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
         loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # if we get a bad data batch, a really high loss can give a really high gradient, which can provide a big shock to the model
+        # gradient norm clipping is then used to ensure that the updates to the model are not very big/shocking.
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         optimizer.step()
         sync()
         t1 = time.time()
         dt = (t1 - t0) * 1000 # time diff in milliseconds
         tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-        print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+        print(f"step {step:4d} | loss: {loss.item():.6f} | lr: {lr:.4e}  | norm: {norm:.4f} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
     
     # NOTE: IMPORTANT INSIGHT
     # 1. We expect the loss to still decrease on the above small dataset.
