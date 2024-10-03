@@ -304,9 +304,15 @@ def test_code():
     # model = GPT.from_pretrained('gpt2')
 
     device = get_device()
+    
+    total_batch_size = 2**19 # 524_288, ~0.5M
+    B, T = 8, 32
+    assert total_batch_size % (B * T) == 0, "make sure total batch size is divisible by B * T"    
+    grad_accum_steps = total_batch_size // (B * T)
+    print(f'Total desired batch size: {total_batch_size}')
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
     # get a data batch
-    B, T = 8, 32
     train_loader = DataLoaderLite(B, T)
     torch.set_float32_matmul_precision('high')
     # get logits
@@ -314,7 +320,9 @@ def test_code():
     print(f"didn't crash yay!")
     model.to(device)
     
+    # TODO: uncomment when want to compile model on CUDA
     # model = torch.compile(model)
+    
     # logits, loss = model(x, y)
     if device == torch.device('cuda'):
         sync = lambda: torch.cuda.synchronize()
@@ -325,12 +333,18 @@ def test_code():
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
     for step in range(max_steps):
         t0 = time.time()
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        # with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
-        logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
-        loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
+        loss_accum = 0.0
+        for micro_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            # NOTE with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
+            logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
+            loss = loss / grad_accum_steps 
+            # NOTE we need to do this, because lets say a batch size of 8, the loss is mean reduction of the batch, so uses the normalizer 1/8 for the 
+            # sum of each elements loss. hence to in case of grad accum, if each batch size of 1 is accumulated over 8 steps, then the 1/8 normalizer is lost.
+            loss_accum += loss.detach()
+            loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # if we get a bad data batch, a really high loss can give a really high gradient, which can provide a big shock to the model
         # gradient norm clipping is then used to ensure that the updates to the model are not very big/shocking.
         lr = get_lr(step)
@@ -339,9 +353,9 @@ def test_code():
         optimizer.step()
         sync()
         t1 = time.time()
-        dt = (t1 - t0) * 1000 # time diff in milliseconds
-        tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-        print(f"step {step:4d} | loss: {loss.item():.6f} | lr: {lr:.4e}  | norm: {norm:.4f} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        dt = (t1 - t0)  # time diff in milliseconds
+        tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / dt
+        print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e}  | norm: {norm:.4f} | dt: {dt * 1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
     
     # NOTE: IMPORTANT INSIGHT
     # 1. We expect the loss to still decrease on the above small dataset.
