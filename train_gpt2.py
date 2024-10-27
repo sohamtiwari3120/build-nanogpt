@@ -1,11 +1,13 @@
 from dataclasses import dataclass
+import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
 import time
 import inspect
-
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 # ---------------------------------------------------------------------------------------
 @dataclass
 class GPTConfig:
@@ -262,9 +264,11 @@ def get_lr(it):
 import tiktoken
 
 class DataLoaderLite:
-    def __init__(self, B, T) -> None:
+    def __init__(self, B, T, process_rank: int, num_processes: int) -> None:
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
         
         # at init load tokens from disc and store into memory
         with open('input.txt', 'r') as f:
@@ -278,7 +282,8 @@ class DataLoaderLite:
         print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
         
         # state
-        self.current_position = 0
+        self.starting_position = self.B * self.T * self.process_rank
+        self.current_position = self.starting_position
         
         
     def next_batch(self):
@@ -288,14 +293,47 @@ class DataLoaderLite:
         y = buf[1:].view(B, T) # targets
         
         # advance the position in the tensor
-        self.current_position += B * T
+        self.current_position += B * T * self.num_processes 
         
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            self.current_position = 0
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens): # checking if all the parallel processes can get another valid batch of data or not
+            self.current_position = self.starting_position
         return x, y
         
         
 def test_code():
+    # simple launch
+    # python train_gpt2.py
+    # DDP launch for e.g. 8 GPUs
+    #torchrun --standalone --nproc_per_node=8 train_gpt2.py
+    
+    # using torch distributed data parallel to train in multi-gpu setup. Do not use torch.nn.DataParallel
+    # as it is deprecated, it is legacy, and possibly slower than torch.distributed.
+    from torch.distributed import init_process_group, destroy_process_group
+    
+    # setup DDP distributed data parallel
+    # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT
+    # torch.distributed.init_process_group() will use these environment variables to initialize the distributed process group
+    
+    
+    ddp = int(os.environ.get('RANK', -1)) != -1
+    if ddp:
+        # use of DDP at the moment demands CUDA, we setthe the device appropriately according to rank
+        assert torch.cuda.is_available(), "for now I think DDP requires CUDA"
+        init_process_group(backend='nccl') # what is NCCL? NCCL (NVIDIA Collective Communications Library) is a high-performance GPU-to-GPU communication library optimized for NVIDIA GPUs. It's used as the backend for distributed training in PyTorch, enabling efficient multi-GPU and multi-node communication, which is crucial for distributed deep learning workloads.
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        device = get_device()
+        master_process = True
+        
+        
     seed = 1337
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -306,14 +344,18 @@ def test_code():
     device = get_device()
     
     total_batch_size = 2**19 # 524_288, ~0.5M
-    B, T = 8, 32
-    assert total_batch_size % (B * T) == 0, "make sure total batch size is divisible by B * T"    
-    grad_accum_steps = total_batch_size // (B * T)
-    print(f'Total desired batch size: {total_batch_size}')
-    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+    # B, T = 8, 32 # for my mac
+    B = 16 # micro batch size
+    T = 1024 # sequence length
+    assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total batch size is divisible by B * T * ddp_world_size"    
+    grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+    
+    if master_process:
+        print(f'Total desired batch size: {total_batch_size}')
+        print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
     # get a data batch
-    train_loader = DataLoaderLite(B, T)
+    train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size)
     torch.set_float32_matmul_precision('high')
     # get logits
     model = GPT(GPTConfig())
@@ -321,7 +363,12 @@ def test_code():
     model.to(device)
     
     # TODO: uncomment when want to compile model on CUDA
-    # model = torch.compile(model)
+    if torch.cuda.is_available():
+        model = torch.compile(model)
+        
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank]) # ddp does all_reduce and computes the average of the gradients across all the GPUs, and then deposits the averaged gradients to each of the GPUs
+    raw_model = model.module if ddp else model # if ddp, then we need to access the module of the model, else just the model
     
     # logits, loss = model(x, y)
     if device == torch.device('cuda'):
@@ -330,7 +377,7 @@ def test_code():
         sync = lambda: torch.mps.synchronize()
         
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
     for step in range(max_steps):
         t0 = time.time()
         optimizer.zero_grad()
@@ -343,8 +390,15 @@ def test_code():
             loss = loss / grad_accum_steps 
             # NOTE we need to do this, because lets say a batch size of 8, the loss is mean reduction of the batch, so uses the normalizer 1/8 for the 
             # sum of each elements loss. hence to in case of grad accum, if each batch size of 1 is accumulated over 8 steps, then the 1/8 normalizer is lost.
-            loss_accum += loss.detach()
+            loss_accum += loss.detach() 
+            if ddp:
+                # if we don't do this, then the gradients will not be synchronized across the GPUs, at every backward step. We want to do at the end of all grad accum steps.
+                # the below hack is from Andrej, and not use the no_sync context manager, as it was leading to code duplication.
+                # we only want to sync the gradients at the end of the grad accum steps, not after every micro_step 
+                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
             loss.backward() #.backward() always does += on existing gradients, hence important to zero grad (unless grad accumulation)
+        if ddp:
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG) # will take average across all the ranks/gpus and redistribute the averaged loss to all the GPUs
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # if we get a bad data batch, a really high loss can give a really high gradient, which can provide a big shock to the model
         # gradient norm clipping is then used to ensure that the updates to the model are not very big/shocking.
         lr = get_lr(step)
@@ -355,7 +409,12 @@ def test_code():
         t1 = time.time()
         dt = (t1 - t0)  # time diff in milliseconds
         tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / dt
-        print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e}  | norm: {norm:.4f} | dt: {dt * 1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        if master_process:
+            print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e}  | norm: {norm:.4f} | dt: {dt * 1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+
+    
+    if ddp:
+        destroy_process_group()
     
     # NOTE: IMPORTANT INSIGHT
     # 1. We expect the loss to still decrease on the above small dataset.
