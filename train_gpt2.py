@@ -318,6 +318,7 @@ def test_code():
     # using torch distributed data parallel to train in multi-gpu setup. Do not use torch.nn.DataParallel
     # as it is deprecated, it is legacy, and possibly slower than torch.distributed.
     from torch.distributed import init_process_group, destroy_process_group
+    enc = tiktoken.get_encoding("gpt2")
     
     # setup DDP distributed data parallel
     # torchrun command sets the env variables RANK, LOCAL_RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT
@@ -410,7 +411,33 @@ def test_code():
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}")
-            
+        
+        if step > 0 and step % 100 == 0:
+            model.eval()
+            num_return_sequences = 4
+            max_length = 32
+            tokens = torch.tensor(enc.encode("Hello, I am a language model"), dtype=torch.long)
+            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+            xgen = tokens.to(device)
+            sample_rng = torch.Generator(device=device)
+            sample_rng.manual_seed(seed + ddp_rank)
+            while xgen.size(1) < max_length:
+                with torch.no_grad():
+                    logits, _ = model(xgen)
+                logits = logits[:, -1, :] # last time step
+                probs = F.softmax(logits, dim=-1)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # select a token from the top k probabilities
+                # note: multinomdial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs, num_samples=1, generator=sample_rng)
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, dim=-1, index=ix)
+                xgen = torch.cat((xgen, xcol), dim=1)
+            # print the generated text
+            for i in range(num_return_sequences):
+                tokens = xgen[i, :max_length].tolist()
+                decoded = enc.decode(tokens)
+                print(f'rank {ddp_rank} sample {i}: {decoded}')
         model.train()
         optimizer.zero_grad()
         loss_accum = 0.0
@@ -419,7 +446,8 @@ def test_code():
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             # NOTE with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
-            logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
             loss = loss / grad_accum_steps 
             # NOTE we need to do this, because lets say a batch size of 8, the loss is mean reduction of the batch, so uses the normalizer 1/8 for the 
             # sum of each elements loss. hence to in case of grad accum, if each batch size of 1 is accumulated over 8 steps, then the 1/8 normalizer is lost.
