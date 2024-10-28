@@ -8,6 +8,8 @@ import time
 import inspect
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+
+from hellaswag import get_most_likely_row, iterate_examples, render_example
 # ---------------------------------------------------------------------------------------
 @dataclass
 class GPTConfig:
@@ -307,7 +309,15 @@ class DataLoaderLite:
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.starting_position
         return x, y
-        
+    
+
+# -----------------------------------------------------------------------------
+# simple launch:
+# python train_gpt2.py
+# DDP launch for e.g. 8 GPUs:
+# torchrun --standalone --nproc_per_node=8 train_gpt2.py
+
+
         
 def test_code():
     # simple launch
@@ -357,6 +367,8 @@ def test_code():
     # B, T = 8, 32 # for my mac
     B = 64 # micro batch size
     T = 1024 # sequence length
+    eval_steps = 250
+    save_steps = 5000
     assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total batch size is divisible by B * T * ddp_world_size"    
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     
@@ -372,9 +384,10 @@ def test_code():
     model = GPT(GPTConfig())
     print(f"didn't crash yay!")
     model.to(device)
+    use_compile = torch.cuda.is_available() and False
     
     # TODO: uncomment when want to compile model on CUDA
-    if torch.cuda.is_available():
+    if use_compile:
         model = torch.compile(model)
         
     if ddp:
@@ -389,12 +402,20 @@ def test_code():
         
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+    
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"log.txt")
+    with open(log_file, "w") as f: # open for writing to clear the file
+        pass
+
+
     for step in range(max_steps):
         t0 = time.time()
-        optimizer.zero_grad()
+        last_step = (step == (max_steps - 1))
         loss_accum = 0.0
-        if step % 100 == 0:
-            model.eval()
+        if step % eval_steps == 0 or last_step:
+            model.eval() 
             val_loader.reset()
             with torch.no_grad():
                 val_loss_accum = 0.0
@@ -410,9 +431,53 @@ def test_code():
             if ddp:
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
-                print(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}")
+                print(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}", file=f)
+                with open(log_file, "a") as f:
+                    f.write(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % save_steps == 0 or last_step):
+                    checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                    checkpoint = {
+                        "model": raw_model.state_dict(),
+                        "config": raw_model.config,
+                        "step": step,
+                        "val_loss": val_loss_accum.item(),
+                    }
+                    torch.save(checkpoint, checkpoint_path)
+                    
+        if (step % eval_steps == 0 or last_step) and (not use_compile):
+            num_correct_norm = 0
+            num_total = 0
+            
+            for i, example in enumerate(iterate_examples("val")):
+                # only process examples where i % ddp_world_size == ddp_rank
+                if i % ddp_world_size != ddp_rank:
+                    continue
+                # render the example into tokens and labels
+                _, tokens, mask, label = render_example(example)
+                tokens = tokens.to(device)
+                mask = mask.to(device)
+                with torch.no_grad():
+                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                        logits, loss = model(tokens, mask)
+                    _, pred_norm = get_most_likely_row(tokens, mask, logits)
+                num_total += 1
+                num_correct_norm += int(pred_norm == label)
+            # reduce the stats across all the processes
+            if ddp:
+                num_correct_norm = torch.tensor(num_correct_norm, device=device, dtype=torch.long)
+                num_total = torch.tensor(num_total, device=device, dtype=torch.long)
+                dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+                dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+                num_correct_norm = num_correct_norm.item()
+                num_total = num_total.item()
+            
+            acc_norm = num_correct_norm / num_total
+            if master_process:
+                print(f"step {step:4d} | Hellaswag acc: {num_correct_norm}/{num_total} = {acc_norm:.4f}", file=f)
+                with open(log_file, "a") as f:
+                    f.write(f"step {step:4d} | Hellaswag acc: {num_correct_norm}/{num_total} = {acc_norm:.4f}\n")
         
-        if step > 0 and step % 100 == 0:
+        if ((step > 0 and step % eval_steps == 0) or last_step) and (not use_compile) and master_process:
             model.eval()
             num_return_sequences = 4
             max_length = 32
@@ -438,6 +503,8 @@ def test_code():
                 tokens = xgen[i, :max_length].tolist()
                 decoded = enc.decode(tokens)
                 print(f'rank {ddp_rank} sample {i}: {decoded}')
+                
+        # train
         model.train()
         optimizer.zero_grad()
         loss_accum = 0.0
