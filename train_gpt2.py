@@ -449,6 +449,7 @@ def test_code():
             num_total = 0
             
             for i, example in enumerate(iterate_examples("val")):
+                # hellaswag evaluation
                 # only process examples where i % ddp_world_size == ddp_rank
                 if i % ddp_world_size != ddp_rank:
                     continue
@@ -520,7 +521,7 @@ def test_code():
             # sum of each elements loss. hence to in case of grad accum, if each batch size of 1 is accumulated over 8 steps, then the 1/8 normalizer is lost.
             loss_accum += loss.detach() 
             if ddp:
-                # if we don't do this, then the gradients will not be synchronized across the GPUs, at every backward step. We want to do at the end of all grad accum steps.
+                # if we don't do this, then the gradients will be synchronized across the GPUs, at every backward step. We want to do at the end of all grad accum steps.
                 # the below hack is from Andrej, and not use the no_sync context manager, as it was leading to code duplication.
                 # we only want to sync the gradients at the end of the grad accum steps, not after every micro_step 
                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
