@@ -266,11 +266,12 @@ def get_lr(it):
 import tiktoken
 import numpy as np
 
-def load_tokens(filename: str):
-    # load a numpy array of uint16 tokens from a binary file
+def load_tokens(filename):
     npt = np.load(filename)
+    npt = npt.astype(np.int32) # added after video
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt
+
 
 class DataLoaderLite:
     def __init__(self, B, T, process_rank: int, num_processes: int, split: str) -> None:

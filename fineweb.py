@@ -37,10 +37,8 @@ def tokenize(doc):
     return tokens_np_uint16
 
 
-def write_datafile(filename: str, tokens_np: np.ndarray):
-    # writes a numpy array of uint16 tokens to a binary file
-    with open(filename, "wb") as f:
-        f.write(tokens_np.tobytes())
+def write_datafile(filename, tokens_np):
+    np.save(filename, tokens_np)
         
 nprocs = max(1, os.cpu_count()//2)
 with mp.Pool(nprocs) as pool:
