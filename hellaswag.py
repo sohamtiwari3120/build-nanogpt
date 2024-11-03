@@ -6,7 +6,7 @@ from tqdm.auto import tqdm
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers import GPT2LMHeadModel
+from transformers import GPT2LMHeadModel, AutoModelForCausalLM
 
 # -----------------------------------
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), 'hellaswag')
@@ -131,7 +131,7 @@ def get_most_likely_row(tokens, mask, logits, return_loss=False):
 @torch.no_grad()
 def evaluate(model_type: str, device):
     torch.set_float32_matmul_precision('high')
-    model = GPT2LMHeadModel.from_pretrained(model_type)
+    model = AutoModelForCausalLM.from_pretrained(model_type)
     model.to(device)
     # model = torch.compile(model) # optionally torch compile the model
     
