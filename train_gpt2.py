@@ -361,8 +361,6 @@ def test_code():
         torch.cuda.manual_seed(seed)
         
     # model = GPT.from_pretrained('gpt2')
-
-    device = get_device()
     
     total_batch_size = 2**19 # 524_288, ~0.5M
     # B, T = 8, 32 # for my mac
@@ -396,9 +394,9 @@ def test_code():
     raw_model = model.module if ddp else model # if ddp, then we need to access the module of the model, else just the model
     
     # logits, loss = model(x, y)
-    if device == torch.device('cuda'):
+    if torch.cuda.is_available():
         sync = lambda: torch.cuda.synchronize()
-    elif device == torch.device('mps'):
+    elif  hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         sync = lambda: torch.mps.synchronize()
         
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
