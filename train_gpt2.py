@@ -282,7 +282,7 @@ class DataLoaderLite:
         self.split = split
         data_root = os.path.join(os.path.dirname(__file__), 'edu_fineweb10')
         shards = os.listdir(data_root)
-        shards = [shard for shard in shards if split in shard]
+        shards = [os.path.join(data_root, shard) for shard in shards if split in shard]
         assert len(shards) > 0, f"No shards found for split: {split}"
         self.shards = shards
         self.starting_position = self.B * self.T * self.process_rank
