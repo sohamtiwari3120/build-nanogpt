@@ -432,7 +432,7 @@ def test_code():
             if ddp:
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
-                print(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}", file=f)
+                print(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a") as f:
                     f.write(f"step {step:4d} | val loss: {val_loss_accum.item():.4f}\n")
                 if step > 0 and (step % save_steps == 0 or last_step):
@@ -475,7 +475,7 @@ def test_code():
             
             acc_norm = num_correct_norm / num_total
             if master_process:
-                print(f"step {step:4d} | Hellaswag acc: {num_correct_norm}/{num_total} = {acc_norm:.4f}", file=f)
+                print(f"step {step:4d} | Hellaswag acc: {num_correct_norm}/{num_total} = {acc_norm:.4f}")
                 with open(log_file, "a") as f:
                     f.write(f"step {step:4d} | Hellaswag acc: {num_correct_norm}/{num_total} = {acc_norm:.4f}\n")
         
