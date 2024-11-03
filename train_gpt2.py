@@ -354,6 +354,8 @@ def test_code():
         device = get_device()
         master_process = True
         
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+        
         
     seed = 1337
     torch.manual_seed(seed)
@@ -422,7 +424,7 @@ def test_code():
                 for _ in range(val_loss_steps):
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
-                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(x, y)
                     loss = loss / val_loss_steps
                     val_loss_accum += loss.detach()
@@ -457,7 +459,7 @@ def test_code():
                 tokens = tokens.to(device)
                 mask = mask.to(device)
                 with torch.no_grad():
-                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(tokens, mask)
                     _, pred_norm = get_most_likely_row(tokens, mask, logits, return_loss=False)
                 num_total += 1
@@ -513,7 +515,7 @@ def test_code():
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             # NOTE with torch.autocast(device_type=device, dtype=torch.bfloat16): # not supported for mps, only for ampere nvidia gpus and above
-            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y) # refer to video about which specific page to refer https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html#adding-torch-autocast
             loss = loss / grad_accum_steps 
             # NOTE we need to do this, because lets say a batch size of 8, the loss is mean reduction of the batch, so uses the normalizer 1/8 for the 
