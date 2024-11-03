@@ -77,9 +77,9 @@ def render_example(example):
     max_len = max(len(tok) for tok in tok_rows)
     tokens = torch.zeros((4, max_len), dtype=torch.long)
     mask = torch.zeros((4, max_len), dtype=torch.long)
-    for i, (tok, mask) in enumerate(zip(tok_rows, mask_rows)):
-        tokens[i, :len(tok)] = torch.tensor(tok)
-        mask[i, :len(mask)] = torch.tensor(mask)
+    for i, (tok_row, mask_row) in enumerate(zip(tok_rows, mask_rows)):
+        tokens[i, :len(tok_row)] = torch.tensor(tok_row)
+        mask[i, :len(mask_row)] = torch.tensor(mask_row)
         
     return data, tokens, mask, label
 

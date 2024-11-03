@@ -249,7 +249,7 @@ def get_device():
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
-max_steps = 19073
+max_steps = 19073 # 19073 steps ~ 1 epoch, if data is 10B tokens, and batch size is 0.5M tokens
 def get_lr(it):
     if it < warmup_steps:
         return max_lr * (it + 1) / warmup_steps
