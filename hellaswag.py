@@ -151,6 +151,7 @@ def evaluate(model_type: str, device):
         
         num_total += 1
         num_correct += int(pred == label)
+        num_correct_norm += int(pred_norm == label)
         print(f"{num_total} acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}")
         
         
