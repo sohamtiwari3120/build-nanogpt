@@ -97,7 +97,7 @@ def iterate_examples(split: str):
 # helper function for HellaSwag eval
 # takes tokens, mask, and logits, returns the index of the completion with the lowest loss
 
-def get_most_likely_row(tokens, mask, logits):
+def get_most_likely_row(tokens, mask, logits, return_loss=False):
     # evaluate the autoregressive loss at all positions
     shift_logits = (logits[..., :-1, :]).contiguous()
     shift_tokens = (tokens[..., 1:]).contiguous()
@@ -115,7 +115,10 @@ def get_most_likely_row(tokens, mask, logits):
     # the one with the lowest loss should be the most likely
     pred = sum_loss.argmin().item()
     pred_norm = avg_loss.argmin().item()
-    return pred, pred_norm
+    if return_loss:
+        return pred, pred_norm, avg_loss
+    else:
+        return pred, pred_norm
 
 # -----------------------------------------------------------------------------
 # simple launch:
@@ -144,7 +147,7 @@ def evaluate(model_type: str, device):
         
         # the one with the lowest loss should be the most likely, answer for the Hellaswag MCQ
         # same intuition as perplexity, but we are looking at the loss of the correct answer
-        pred, pred_norm = get_most_likely_row(tokens, mask, logits)
+        pred, pred_norm, avg_loss = get_most_likely_row(tokens, mask, logits, return_loss=True)
         
         num_total += 1
         num_correct += int(pred == label)

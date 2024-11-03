@@ -460,7 +460,7 @@ def test_code():
                 with torch.no_grad():
                     with torch.autocast(device_type=device, dtype=torch.bfloat16):
                         logits, loss = model(tokens, mask)
-                    _, pred_norm = get_most_likely_row(tokens, mask, logits)
+                    _, pred_norm = get_most_likely_row(tokens, mask, logits, return_loss=False)
                 num_total += 1
                 num_correct_norm += int(pred_norm == label)
             # reduce the stats across all the processes
